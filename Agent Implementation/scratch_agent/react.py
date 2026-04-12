@@ -1,0 +1,185 @@
+
+import json
+import re
+from colorama import Fore
+from openai import OpenAI
+
+
+from scratch_agent.tools import tool, Tool, validate_arguments
+from scratch_agent.utils import ChatHistory, completions_create, extract_tag_content, update_chat_history, build_prompt_structure
+
+BASE_SYSTEM_PROMPT = ""
+
+REACT_SYSTEM_PROMPT = """
+    You operate by running a loop with the following steps: Thought Action, Observation.
+    You are provided with function signature within <tools></tools> XML tags.
+    You may call one or more functions to assist with the user query. Don't make assumptions about what value to plug
+    into functions. Pay special attention to the properties 'types'. You should use those types as in a python dict.
+
+    for each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follow
+
+    <tool_call>
+    {'name':<function-name>,'arguments':<args-dict>,'id':<monotonically-increasing-id>}
+    </tool_call>
+
+    Here are the available tools / actions:
+
+    <tools>
+    %s
+    </tools>
+
+    Example Session:
+
+    <question> whats the current temprature in delhi</question>
+    <thought>I need to get the current weather in delhi</thought>
+    <tool_call>{"name": "get_current_weather","arguments":{"location": "delhi", "unit": "celsius"}, "id":0}</tool_call>
+
+    You will be called again with this:
+    <observation>{0:{"temperature":25, "unit": "celsius"}}</observation>
+
+    You then output:
+    <response>The Current temperature in delhi is 25 degree Celsius</response>
+
+    Additional constraints:
+
+    -If the user asks you something unrelated to any of the tools above, answer freely enclosing your answer with <response></response> Tags.
+    """
+
+
+
+class ReactAgent:
+    """
+    A class that represents an agent uisng the ReAct logic that interacts with tools to process user inputs, make dicisions, and executes
+     tool calls. the agent can run interactive sessions, collect tool signature, and process multiple tools calls in a given round of interaction.
+
+     Attributes:
+         client(OpenAI): The OpenAI client used to handle model-based completions.
+         model(str): The name of the model used for generating responses. Default to 'GPT-4o'.
+         tools(list[Tools]): A list of Tool instances available for execution.
+         tools_dict: A dict mapping tool names to their corresponding Tool instances
+    """
+
+    def __init__(self, tools:Tool|list[Tool], model:str='gpt-4o', system_prompt:str=BASE_SYSTEM_PROMPT,api_key:str='')->None:
+
+        self.client = OpenAI(api_key = api_key)
+        self.model = model
+        self.system_prompt = system_prompt
+
+        self.tools = tools if isinstance(tools, list) else [tools]
+        self.tools_dict = {tool.name: tool for tool in self.tools}
+
+    def add_tool_signatures(self)->dict:
+        """
+        Collects the function signature of all available tools.
+
+        Returns:
+            str: A concatenated string of all tool function signature in JSON format.
+        """
+        return "".join([tool.fn_signature for tool in self.tools])
+
+
+    def process_tool_calls(self, tool_calls_contents:list)->dict:
+        """
+        Processes each tool call validates arguments, executes the tools, and collects results.
+
+        Args:
+            tool_calls_content (list): List of strings each representing a tool call in json fromat.
+
+        Returns:
+            dict: A dictionary where the keys are tool call IDs and value are the results from the tools.
+        """
+
+        observations = {}
+        for tool_call_str in tool_calls_contents:
+            tool_call_str = tool_call_str.replace("'", '"')
+            tool_call = json.loads(tool_call_str)
+            
+            tool_name = tool_call.get('name')
+            
+            tool = self.tools_dict[tool_name]
+
+            print(Fore.GREEN +f"\nUsing Tool: {tool_name}")
+
+            # Validate and  execute the tool call
+            validated_tool_call = validate_arguments(
+                tool_call, json.loads(tool.fn_signature)
+            )
+
+            print(Fore.GREEN + f"\nTool call dict: \n{validated_tool_call}")
+
+            result = tool.run(**validated_tool_call['arguments'])
+            print(Fore.GREEN + f"\nTool Result: \n{result}")
+
+            # Store the result using the tool call ID
+            observations[validated_tool_call['id']] = result
+
+        return observations
+
+    def run (self, user_msg:str, max_rounds:int=10)->str:
+        """
+        Executes a user interaction session where the agent processes user input, generates responses
+        handles tool calls, and updates chat history until a final response is ready or the maximum number of rounds is reached.
+
+        Args:
+            user_msg(str): The users input message to start the interaction.
+            max_rounds (int, optional): Maximum number of interaction rounds the agent should perform. default to 10.
+
+        Returns:
+            str: The final response generated by the agent after processing user input and any tool calls.
+        """
+
+        user_prompt = build_prompt_structure(
+            prompt=user_msg, role='user', tag='question'
+        )
+
+        if self.tools:
+            self.system_prompt+=("\n" + REACT_SYSTEM_PROMPT % self.add_tool_signatures())
+
+        chat_history = ChatHistory([
+
+            build_prompt_structure(
+                prompt=self.system_prompt, role='system'
+            ),
+            user_prompt,
+        ]
+        )
+
+        if self.tools:
+
+            # Run the ReAct Loop for max_rounds
+
+            for _ in range(max_rounds):
+                completion = completions_create(self.client, chat_history, self.model)
+
+                response = extract_tag_content(str(completion), "response")
+
+                if response.found:
+                    return response.content[0]
+
+                thought = extract_tag_content(str(completion),'thought')
+                tool_calls = extract_tag_content(str(completion),'tool_call')
+
+                print("thought",thought)
+                update_chat_history(chat_history, completion, 'assistant')
+
+                print(Fore.MAGENTA + f"\nThought: {thought.content[0]}")
+
+
+                if tool_calls.found:
+                    observations = self.process_tool_calls(tool_calls.content)
+                    print(Fore.BLUE + f"\bObservations: {observations}")
+                    update_chat_history(chat_history, f"{observations}", "user")
+
+        return completions_create(self.client, chat_history, self.model)
+
+
+
+
+
+
+
+
+
+
+
+
