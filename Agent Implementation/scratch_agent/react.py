@@ -11,7 +11,7 @@ from scratch_agent.utils import ChatHistory, completions_create, extract_tag_con
 BASE_SYSTEM_PROMPT = ""
 
 REACT_SYSTEM_PROMPT = """
-    You operate by running a loop with the following steps: Thought Action, Observation.
+    You operate by running a loop with the following steps: Thought, Action, Observation.
     You are provided with function signature within <tools></tools> XML tags.
     You may call one or more functions to assist with the user query. Don't make assumptions about what value to plug
     into functions. Pay special attention to the properties 'types'. You should use those types as in a python dict.
@@ -91,11 +91,8 @@ class ReactAgent:
 
         observations = {}
         for tool_call_str in tool_calls_contents:
-            tool_call_str = tool_call_str.replace("'", '"')
             tool_call = json.loads(tool_call_str)
-            
-            tool_name = tool_call.get('name')
-            
+            tool_name = tool_call['name']
             tool = self.tools_dict[tool_name]
 
             print(Fore.GREEN +f"\nUsing Tool: {tool_name}")
@@ -129,7 +126,7 @@ class ReactAgent:
         """
 
         user_prompt = build_prompt_structure(
-            prompt=user_msg, role='user', tag='question'
+            prompt=user_msg, role='user', tags='question'
         )
 
         if self.tools:
@@ -159,14 +156,13 @@ class ReactAgent:
                 thought = extract_tag_content(str(completion),'thought')
                 tool_calls = extract_tag_content(str(completion),'tool_call')
 
-                print("thought",thought)
                 update_chat_history(chat_history, completion, 'assistant')
 
                 print(Fore.MAGENTA + f"\nThought: {thought.content[0]}")
 
 
                 if tool_calls.found:
-                    observations = self.process_tool_calls(tool_calls.content)
+                    observations = self.process_tools_calls(tool_calls.content)
                     print(Fore.BLUE + f"\bObservations: {observations}")
                     update_chat_history(chat_history, f"{observations}", "user")
 
